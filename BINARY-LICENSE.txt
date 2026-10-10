@@ -1,0 +1,15 @@
+PaladinsCat mod binaries
+Copyright (c) 2026 PaladinsCat. All rights reserved.
+
+Permission is granted to download, retain, use and redistribute the unmodified
+mod binaries distributed with this release, provided this notice is retained.
+This permission does not grant rights to the Paladins client, Windows modules,
+Tempest Launcher or other third-party software, none of which is included.
+
+THE MOD BINARIES ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. TO THE
+MAXIMUM EXTENT PERMITTED BY LAW, THE AUTHORS SHALL NOT BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY ARISING FROM THEIR USE.
+
+The public Rust launcher, package tooling and documentation are separately
+licensed under the MIT license in LICENSE. Their license does not make the
+unpublished WatchCat implementation source available.

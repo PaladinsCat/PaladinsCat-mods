@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "paladins-performance",
+  "version": "0.1.0",
+  "platform": "windows-x86_64",
+  "game": "Paladins Season 8.1 original Win64",
+  "game_sha256": "0c51d381dfe9ecbc1f571ab36603478626375704f4e4e40482524a1adafd6f75",
+  "input": {"file":"watchcat-native-input-compact-modifier.dll","sha256":"f45578bc07a204dd3b992a5faca7945ca1695b8a9386f4ac0072ec9b463a3f1d"},
+  "world": {"file":"watchcat-world-scheduler.dll","sha256":"2b5893da71714f36548146d466f310490f859354803a0d0a71123bc53464e0e4"},
+  "rollback_input": {"file":"watchcat-native-input-raw-read-original.dll","sha256":"2da0b9da101ddf82bbc7e2f3a61205b47e96bd9200864bb86854d4fb17de61e6"},
+  "dinput8_sha256": "b0f10001fccd05e9863d84588be9b9f8389656d95177287dd4c6cf3be4bf1dfe",
+  "user32_sha256": "f285937030bcb325cad39ee5be4818f6666241229adeadea4ff1ae469dfd7ef3",
+  "performance_verified": false,
+  "compatibility_verified": false,
+  "benchmark_recordings": "Skipped at maintainer request for first release",
+  "fps_policy": "No mod limiter; 1000 FPS is a target, not a cap or guaranteed outcome"
+}
