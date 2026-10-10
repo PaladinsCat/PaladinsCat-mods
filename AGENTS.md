@@ -1,5 +1,7 @@
 # PaladinsCat mods release repository
 
+Public descriptions follow the wiki's `documents/06-reference/design/frontend-design-system.md` Page header rules: identity and purpose only; omit redundant descriptions and technical handling, thresholds, lifecycle state and provenance. Keep setup instructions direct. Technical validation belongs to private WatchCat evidence, not release prose. This corrects the human-reported 2026-10-10 bloated first-release copy.
+
 This is an independent public release checkout under the non-Git PaladinsCat workspace parent. Follow its `AGENTS.md` and `PUBLICATION_BOUNDARY.md`. Keep source implementation of game hooks in WatchCat; publish only explicitly approved immutable binaries as GitHub release assets. Never copy private recordings, diagnostics, credentials, game executables, system DLLs or Tempest binaries into this repository.
 
 Tooling and runtime logic must be Rust. Test with the commands in CONTRIBUTING.md. Preserve game/native/DLL pins, correct Tempest `--dll` placement and manual existing-game exit. No task approval authorizes Computer Use, game launch, restart or capture unless the human separately grants those actions. CPU-only tooling does not prove live GPU routing.

@@ -11,7 +11,5 @@
   "dinput8_sha256": "b0f10001fccd05e9863d84588be9b9f8389656d95177287dd4c6cf3be4bf1dfe",
   "user32_sha256": "f285937030bcb325cad39ee5be4818f6666241229adeadea4ff1ae469dfd7ef3",
   "performance_verified": false,
-  "compatibility_verified": false,
-  "benchmark_recordings": "Skipped at maintainer request for first release",
-  "fps_policy": "No mod limiter; 1000 FPS is a target, not a cap or guaranteed outcome"
+  "compatibility_verified": false
 }
