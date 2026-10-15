@@ -2,6 +2,8 @@
 
 Use a personal fork and a pull request to protected `main`. Changes require a repository owner's review. Never commit generated DLLs, executables, archives, game data, private diagnostics, credentials or runtime files. Release assets are generated locally from reviewed immutable DLLs; this repository does not rebuild the private WatchCat hooks.
 
+Owner-directed agent work stays in the existing `main` checkout without branches, worktrees, forks or pull requests. Validate locally before pushing and retain GitHub CI after push. Preserve main-only remote rules and never use admin bypass. The contributor procedure above does not override this owner workflow.
+
 All release tooling is Rust. Validate with:
 
 ```text
