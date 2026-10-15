@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "mod": "paladins-performance",
   "platform": "windows-x86_64",
   "game_sha256": "0c51d381dfe9ecbc1f571ab36603478626375704f4e4e40482524a1adafd6f75",
@@ -18,8 +18,8 @@
     },
     {
       "name": "watchcat-world-scheduler.dll",
-      "sha256": "507037364efd907d439d1abebd1c3f764321dab604f99f7a92ef97947d055063",
-      "bytes": 210944
+      "sha256": "033a4a13aeabd9e5f99f240be2223c5b4db1679e0c1ca161c3eed812795e5407",
+      "bytes": 220160
     },
     {
       "name": "watchcat-native-input-raw-read-original.dll",
