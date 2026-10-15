@@ -19,7 +19,7 @@ pub const PAYLOADS: [(&str, &str); 3] = [
     ),
     (
         "watchcat-world-scheduler.dll",
-        "2b5893da71714f36548146d466f310490f859354803a0d0a71123bc53464e0e4",
+        "e869e574e8df72ec5bc9ca3930ecab3a979ab50156572c32a10a1261a57173ec",
     ),
     (
         "watchcat-native-input-raw-read-original.dll",

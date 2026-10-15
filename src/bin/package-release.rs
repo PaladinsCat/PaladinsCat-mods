@@ -119,10 +119,10 @@ fn main() -> Result<()> {
     }
     files.push(("paladinscat-mods.exe".into(), fs::read(&launcher)?));
     for (name, relative) in [
-        ("README.md", "docs/performance-mod.md"),
-        ("RELEASE_NOTES.md", "releases/v0.1.0.md"),
-        ("LICENSE", "LICENSE"),
-        ("BINARY-LICENSE.txt", "BINARY-LICENSE.txt"),
+        ("README.md", "docs/performance-mod.md".to_string()),
+        ("RELEASE_NOTES.md", format!("releases/v{VERSION}.md")),
+        ("LICENSE", "LICENSE".to_string()),
+        ("BINARY-LICENSE.txt", "BINARY-LICENSE.txt".to_string()),
     ] {
         files.push((name.into(), fs::read(root.join(relative))?));
     }
