@@ -65,6 +65,12 @@ pub struct Asset {
     pub bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPolicy {
+    ActiveLogicalProcessors,
+}
+
 fn validate_assets(assets: &[Asset], expected: &[&str]) -> Result<()> {
     let mut names = BTreeSet::new();
     for asset in assets {
@@ -116,6 +122,8 @@ pub struct Manifest {
     pub performance_verified: bool,
     pub compatibility_verified: bool,
     pub rendering: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_policy: Option<WorkerPolicy>,
     pub assets: Vec<Asset>,
 }
 
@@ -164,6 +172,8 @@ pub struct Recipe {
     pub performance_verified: bool,
     pub compatibility_verified: bool,
     pub rendering: String,
+    #[serde(default)]
+    pub worker_policy: Option<WorkerPolicy>,
     pub payloads: Vec<Asset>,
 }
 
@@ -201,6 +211,7 @@ impl Recipe {
             performance_verified: self.performance_verified,
             compatibility_verified: self.compatibility_verified,
             rendering: self.rendering,
+            worker_policy: self.worker_policy,
             assets,
         };
         manifest.validate()?;
@@ -409,6 +420,86 @@ pub fn launch_arguments(options: &Options, bundle: &Path) -> Result<Vec<String>>
     ])
 }
 
+#[cfg(windows)]
+pub fn active_logical_processors() -> Result<u32> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetActiveProcessorGroupCount() -> u16;
+        fn GetActiveProcessorCount(group: u16) -> u32;
+    }
+    let groups = unsafe { GetActiveProcessorGroupCount() };
+    if groups == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if groups != 1 {
+        return Err("The native worker policy requires a single Windows processor group".into());
+    }
+    let count = unsafe { GetActiveProcessorCount(u16::MAX) };
+    if count == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(count)
+}
+
+#[cfg(not(windows))]
+pub fn active_logical_processors() -> Result<u32> {
+    Err("The native worker policy requires Windows".into())
+}
+
+fn set_worker_argument(arguments: &mut Vec<String>, count: u32) -> Result<()> {
+    if count == 0 || count > i32::MAX as u32 {
+        return Err("Invalid native worker count".into());
+    }
+    let separators: Vec<_> = arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, arg)| (arg == "--").then_some(index))
+        .collect();
+    let [separator] = separators.as_slice() else {
+        return Err("Exactly one native game argument separator is required".into());
+    };
+    let existing: Vec<_> = arguments
+        .iter()
+        .enumerate()
+        .skip(separator + 1)
+        .filter_map(|(index, arg)| {
+            arg.trim_start_matches(['-', '/'])
+                .split_once('=')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("THREADPOOL"))
+                .then_some(index)
+        })
+        .collect();
+    let value = format!("THREADPOOL={count}");
+    match existing.as_slice() {
+        [] => arguments.push(value),
+        [index] => arguments[*index] = value,
+        _ => return Err("Duplicate native THREADPOOL arguments".into()),
+    }
+    Ok(())
+}
+
+fn launch_arguments_with_cpu_count(
+    options: &Options,
+    bundle: &Path,
+    manifest: &Manifest,
+    resolve_count: impl FnOnce() -> Result<u32>,
+) -> Result<Vec<String>> {
+    manifest.validate()?;
+    let mut arguments = launch_arguments(options, bundle)?;
+    if manifest.worker_policy == Some(WorkerPolicy::ActiveLogicalProcessors) {
+        set_worker_argument(&mut arguments, resolve_count()?)?;
+    }
+    Ok(arguments)
+}
+
+pub fn launch_arguments_for_manifest(
+    options: &Options,
+    bundle: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<String>> {
+    launch_arguments_with_cpu_count(options, bundle, manifest, active_logical_processors)
+}
+
 pub fn preflight(options: &Options, bundle: &Path, system: &Path) -> Result<Manifest> {
     if !options.game_root.is_absolute()
         || !options.tempest.is_absolute()
@@ -514,6 +605,7 @@ mod tests {
             performance_verified: false,
             compatibility_verified: false,
             rendering: "uncapped".into(),
+            worker_policy: None,
             assets: FILES
                 .iter()
                 .map(|name| Asset {
@@ -662,6 +754,134 @@ mod tests {
         assert!(Recipe::parse(&serde_json::to_vec(&recipe).unwrap()).is_ok());
         recipe["payloads"].as_array_mut().unwrap().pop();
         assert!(Recipe::parse(&serde_json::to_vec(&recipe).unwrap()).is_err());
+    }
+
+    #[test]
+    fn legacy_manifest_keeps_arguments_without_querying_topology() {
+        let options = parse(&args(&["--dry-run", "--rollback"])).unwrap();
+        let bundle = Path::new("C:/Mods");
+        let manifest = fixture("0.1.2");
+        let raw = serde_json::to_vec(&manifest).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("worker_policy"));
+        let loaded = Manifest::parse(&raw).unwrap();
+        assert_eq!(loaded.worker_policy, None);
+        let actual = launch_arguments_with_cpu_count(&options, bundle, &loaded, || {
+            panic!("Legacy metadata must not select a worker policy")
+        })
+        .unwrap();
+        assert_eq!(actual, launch_arguments(&options, bundle).unwrap());
+    }
+
+    #[test]
+    fn selected_manifest_policy_sets_dynamic_native_count_for_both_input_variants() {
+        for rollback in [false, true] {
+            let mut options = parse(&args(&["--dry-run"])).unwrap();
+            options.rollback = rollback;
+            let bundle = Path::new("C:/Mods With Spaces");
+            let mut manifest = fixture("71.23.109");
+            manifest.worker_policy = Some(WorkerPolicy::ActiveLogicalProcessors);
+            let baseline = launch_arguments(&options, bundle).unwrap();
+            for count in [1, 13, 57] {
+                let mut queries = 0;
+                let actual = launch_arguments_with_cpu_count(&options, bundle, &manifest, || {
+                    queries += 1;
+                    Ok(count)
+                })
+                .unwrap();
+                assert_eq!(queries, 1);
+                assert_eq!(&actual[..baseline.len()], baseline);
+                assert_eq!(actual[6], "--dll");
+                assert_eq!(actual[8], "--");
+                assert_eq!(actual.last().unwrap(), &format!("THREADPOOL={count}"));
+                assert_eq!(
+                    actual
+                        .iter()
+                        .filter(|a| a.starts_with("THREADPOOL="))
+                        .count(),
+                    1
+                );
+                assert_eq!(manifest.version, "71.23.109");
+                assert_eq!(manifest.source_revision, "a".repeat(40));
+            }
+        }
+    }
+
+    #[test]
+    fn worker_policy_rejects_unknown_values_and_survives_recipe_packaging() {
+        let fixture = fixture("71.23.109");
+        let mut manifest = serde_json::to_value(&fixture).unwrap();
+        let mut recipe: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../release-recipe.json")).unwrap();
+        recipe["version"] = "71.23.109".into();
+        for value in [
+            serde_json::json!("fixed_eight"),
+            serde_json::json!("ActiveLogicalProcessors"),
+            serde_json::json!(17),
+            serde_json::json!({"active_logical_processors": true}),
+        ] {
+            manifest["worker_policy"] = value.clone();
+            recipe["worker_policy"] = value;
+            assert!(Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).is_err());
+            assert!(Recipe::parse(&serde_json::to_vec(&recipe).unwrap()).is_err());
+        }
+        recipe["worker_policy"] = "active_logical_processors".into();
+        let recipe = Recipe::parse(&serde_json::to_vec(&recipe).unwrap()).unwrap();
+        let packaged = recipe
+            .manifest(fixture.source_revision.clone(), fixture.assets)
+            .unwrap();
+        let raw = serde_json::to_vec(&packaged).unwrap();
+        assert_eq!(
+            Manifest::parse(&raw).unwrap().worker_policy,
+            Some(WorkerPolicy::ActiveLogicalProcessors)
+        );
+        assert_eq!(packaged.version, "71.23.109");
+        let duplicate = String::from_utf8(raw).unwrap().replacen(
+            '{',
+            "{\"worker_policy\":\"active_logical_processors\",",
+            1,
+        );
+        assert!(Manifest::parse(duplicate.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn worker_argument_replaces_one_value_and_refuses_duplicates_without_changes() {
+        let mut arguments = args(&["--dll", "C:/THREADPOOL=payload.dll", "--", "-ThreadPool=8"]);
+        set_worker_argument(&mut arguments, 23).unwrap();
+        assert_eq!(arguments[1], "C:/THREADPOOL=payload.dll");
+        assert_eq!(arguments[3], "THREADPOOL=23");
+        arguments.push("/threadpool=9".into());
+        let duplicate = arguments.clone();
+        assert!(set_worker_argument(&mut arguments, 31).is_err());
+        assert_eq!(arguments, duplicate);
+        for count in [0, u32::MAX] {
+            let mut arguments = args(&["--", "-nosteam"]);
+            let previous = arguments.clone();
+            assert!(set_worker_argument(&mut arguments, count).is_err());
+            assert_eq!(arguments, previous);
+        }
+        for mut arguments in [args(&["launch"]), args(&["--", "--"])] {
+            assert!(set_worker_argument(&mut arguments, 7).is_err());
+        }
+    }
+
+    #[test]
+    fn worker_policy_validates_package_source_and_propagates_cpu_query_failure() {
+        let options = parse(&args(&["--dry-run"])).unwrap();
+        let mut manifest = fixture("71.23.109");
+        manifest.worker_policy = Some(WorkerPolicy::ActiveLogicalProcessors);
+        assert!(
+            launch_arguments_with_cpu_count(&options, Path::new("C:/Mods"), &manifest, || {
+                Err("unsupported processor topology".into())
+            })
+            .is_err()
+        );
+        manifest.source_revision.clear();
+        assert!(
+            launch_arguments_with_cpu_count(&options, Path::new("C:/Mods"), &manifest, || {
+                panic!("Invalid package provenance must be rejected before topology lookup")
+            })
+            .is_err()
+        );
     }
 
     #[test]

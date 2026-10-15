@@ -1,6 +1,6 @@
 use paladinscat_mods::{Options, Result, VERSION, parse};
 #[cfg(windows)]
-use paladinscat_mods::{launch_arguments, preflight};
+use paladinscat_mods::{launch_arguments_for_manifest, preflight};
 #[cfg(windows)]
 use std::{path::Path, process::Command};
 
@@ -30,7 +30,7 @@ fn run(options: &Options) -> Result<()> {
         .canonicalize()?;
     let system = std::path::PathBuf::from(std::env::var("SystemRoot")?).join("System32");
     let manifest = preflight(options, &bundle, &system)?;
-    let argv = launch_arguments(options, &bundle)?;
+    let argv = launch_arguments_for_manifest(options, &bundle, &manifest)?;
     println!(
         "PaladinsCat performance mod v{}; package and native compatibility verified.",
         manifest.version
