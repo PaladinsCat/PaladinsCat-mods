@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "version": "0.1.2",
+  "mod": "paladins-performance",
+  "platform": "windows-x86_64",
+  "game_sha256": "0c51d381dfe9ecbc1f571ab36603478626375704f4e4e40482524a1adafd6f75",
+  "dinput8_sha256": "b0f10001fccd05e9863d84588be9b9f8389656d95177287dd4c6cf3be4bf1dfe",
+  "user32_sha256": "f285937030bcb325cad39ee5be4818f6666241229adeadea4ff1ae469dfd7ef3",
+  "performance_verified": false,
+  "compatibility_verified": false,
+  "rendering": "uncapped; 1000 FPS target is not a limiter",
+  "payloads": [
+    {
+      "name": "watchcat-native-input-compact-modifier.dll",
+      "sha256": "f45578bc07a204dd3b992a5faca7945ca1695b8a9386f4ac0072ec9b463a3f1d",
+      "bytes": 134144
+    },
+    {
+      "name": "watchcat-world-scheduler.dll",
+      "sha256": "ea050052b8113b1617243292fa4421dca3b6212c45766d44827595b6475aeb7b",
+      "bytes": 137728
+    },
+    {
+      "name": "watchcat-native-input-raw-read-original.dll",
+      "sha256": "2da0b9da101ddf82bbc7e2f3a61205b47e96bd9200864bb86854d4fb17de61e6",
+      "bytes": 151552
+    }
+  ]
+}

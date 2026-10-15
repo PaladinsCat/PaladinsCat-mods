@@ -1,7 +1,7 @@
 use paladinscat_mods::{
-    Asset, DINPUT_SHA, GAME_SHA, PAYLOADS, Result, USER32_SHA, VERSION, digest, verify,
+    Asset, MAX_ASSET_BYTES, PAYLOADS, Recipe, Result, VERSION, digest, read_local_file,
+    verify_asset_bytes,
 };
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
@@ -99,9 +99,9 @@ fn save_new(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 4 {
+    if args.len() != 4 && args.len() != 5 {
         return Err(
-            "Usage: package-release PAYLOAD_DIR LAUNCHER_EXE OUTPUT_DIR SOURCE_REVISION".into(),
+            "Usage: package-release PAYLOAD_DIR LAUNCHER_EXE OUTPUT_DIR SOURCE_REVISION [WORLD_DLL]".into(),
         );
     }
     let payload = PathBuf::from(&args[0]);
@@ -112,15 +112,42 @@ fn main() -> Result<()> {
         return Err("Exact 40-character source revision required".into());
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    for (name, expected) in PAYLOADS {
-        verify(&payload.join(name), expected)?;
-        files.push((name.to_string(), fs::read(payload.join(name))?));
+    let recipe = Recipe::parse(&read_local_file(&root, "release-recipe.json", 64 * 1024)?)?;
+    if recipe.version != VERSION {
+        return Err("Release recipe version differs from the package tool identity".into());
     }
-    files.push(("paladinscat-mods.exe".into(), fs::read(&launcher)?));
+    let version = recipe.version.clone();
+    let mut files = Vec::new();
+    for asset in &recipe.payloads {
+        let bytes = if asset.name == PAYLOADS[1] && args.len() == 5 {
+            let world = PathBuf::from(&args[4]).canonicalize()?;
+            read_local_file(
+                world.parent().ok_or("World payload parent missing")?,
+                world
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or("World payload name missing")?,
+                MAX_ASSET_BYTES,
+            )?
+        } else {
+            read_local_file(&payload, &asset.name, MAX_ASSET_BYTES)?
+        };
+        verify_asset_bytes(asset, &bytes)?;
+        files.push((asset.name.clone(), bytes));
+    }
+    let launcher = launcher.canonicalize()?;
+    let launcher_root = launcher.parent().ok_or("Launcher parent missing")?;
+    let launcher_name = launcher
+        .file_name()
+        .and_then(|p| p.to_str())
+        .ok_or("Launcher filename missing")?;
+    files.push((
+        "paladinscat-mods.exe".into(),
+        read_local_file(launcher_root, launcher_name, MAX_ASSET_BYTES)?,
+    ));
     for (name, relative) in [
         ("README.md", "docs/performance-mod.md".to_string()),
-        ("RELEASE_NOTES.md", format!("releases/v{VERSION}.md")),
+        ("RELEASE_NOTES.md", format!("releases/v{version}.md")),
         ("LICENSE", "LICENSE".to_string()),
         ("BINARY-LICENSE.txt", "BINARY-LICENSE.txt".to_string()),
     ] {
@@ -134,20 +161,17 @@ fn main() -> Result<()> {
             bytes: bytes.len() as u64,
         })
         .collect();
-    let manifest = serde_json::to_vec_pretty(&json!({
-        "schema": 1, "version": VERSION, "mod": "paladins-performance", "platform": "windows-x86_64",
-        "source_revision": revision, "game_sha256": GAME_SHA, "dinput8_sha256": DINPUT_SHA, "user32_sha256": USER32_SHA,
-        "performance_verified": false, "compatibility_verified": false, "rendering": "uncapped; 1000 FPS target is not a limiter",
-        "assets": assets
-    }))?;
-    let mut sums: String = assets
+    let package = recipe.manifest(revision.to_owned(), assets)?;
+    let manifest = serde_json::to_vec_pretty(&package)?;
+    let mut sums: String = package
+        .assets
         .iter()
         .map(|a| format!("{}  {}\n", a.sha256, a.name))
         .collect();
     sums.push_str(&format!("{:x}  manifest.json\n", Sha256::digest(&manifest)));
     files.push(("manifest.json".into(), manifest.clone()));
     files.push(("SHA256SUMS.txt".into(), sums.into_bytes()));
-    let archive_name = format!("PaladinsCat-performance-v{VERSION}-windows-x64.zip");
+    let archive_name = format!("PaladinsCat-performance-v{version}-windows-x64.zip");
     fs::create_dir_all(&output)?;
     let bundle = output.join("bundle");
     fs::create_dir_all(&bundle)?;

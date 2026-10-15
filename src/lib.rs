@@ -1,31 +1,297 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     error::Error,
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const GAME_SHA: &str = "0c51d381dfe9ecbc1f571ab36603478626375704f4e4e40482524a1adafd6f75";
-pub const DINPUT_SHA: &str = "b0f10001fccd05e9863d84588be9b9f8389656d95177287dd4c6cf3be4bf1dfe";
-pub const USER32_SHA: &str = "f285937030bcb325cad39ee5be4818f6666241229adeadea4ff1ae469dfd7ef3";
-pub const PAYLOADS: [(&str, &str); 3] = [
-    (
-        "watchcat-native-input-compact-modifier.dll",
-        "f45578bc07a204dd3b992a5faca7945ca1695b8a9386f4ac0072ec9b463a3f1d",
-    ),
-    (
-        "watchcat-world-scheduler.dll",
-        "e869e574e8df72ec5bc9ca3930ecab3a979ab50156572c32a10a1261a57173ec",
-    ),
-    (
-        "watchcat-native-input-raw-read-original.dll",
-        "2da0b9da101ddf82bbc7e2f3a61205b47e96bd9200864bb86854d4fb17de61e6",
-    ),
+pub const PAYLOADS: [&str; 3] = [
+    "watchcat-native-input-compact-modifier.dll",
+    "watchcat-world-scheduler.dll",
+    "watchcat-native-input-raw-read-original.dll",
 ];
+pub const FILES: [&str; 8] = [
+    PAYLOADS[0],
+    PAYLOADS[1],
+    PAYLOADS[2],
+    "paladinscat-mods.exe",
+    "README.md",
+    "RELEASE_NOTES.md",
+    "LICENSE",
+    "BINARY-LICENSE.txt",
+];
+pub const MAX_ASSET_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_METADATA_BYTES: u64 = 64 * 1024;
+
+fn hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+fn release_version(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 10
+                && p.bytes().all(|c| c.is_ascii_digit())
+                && (p.len() == 1 || !p.starts_with('0'))
+                && p.parse::<u32>().is_ok()
+        })
+}
+
+fn flat_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && name.is_ascii()
+        && !name.contains(['/', '\\', ':', ','])
+        && !name.contains("..")
+        && !name.ends_with(['.', ' '])
+        && !name.chars().any(char::is_control)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Asset {
+    pub name: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+fn validate_assets(assets: &[Asset], expected: &[&str]) -> Result<()> {
+    let mut names = BTreeSet::new();
+    for asset in assets {
+        if !flat_name(&asset.name)
+            || !hex(&asset.sha256, 64)
+            || asset.bytes == 0
+            || asset.bytes > MAX_ASSET_BYTES
+            || !names.insert(asset.name.as_str())
+        {
+            return Err("Invalid or duplicate package asset".into());
+        }
+    }
+    if names != expected.iter().copied().collect() {
+        return Err("Package asset inventory differs from its protocol".into());
+    }
+    Ok(())
+}
+
+fn validate_identity(
+    schema: u32,
+    version: &str,
+    mod_name: &str,
+    platform: &str,
+    native: [&str; 3],
+) -> Result<()> {
+    if schema != 1
+        || !release_version(version)
+        || mod_name != "paladins-performance"
+        || platform != "windows-x86_64"
+        || native.iter().any(|h| !hex(h, 64))
+    {
+        return Err("Unsupported package identity or native compatibility metadata".into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    pub schema: u32,
+    pub version: String,
+    #[serde(rename = "mod")]
+    pub mod_name: String,
+    pub platform: String,
+    pub source_revision: String,
+    pub game_sha256: String,
+    pub dinput8_sha256: String,
+    pub user32_sha256: String,
+    pub performance_verified: bool,
+    pub compatibility_verified: bool,
+    pub rendering: String,
+    pub assets: Vec<Asset>,
+}
+
+impl Manifest {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_METADATA_BYTES {
+            return Err("Package manifest exceeds its size bound".into());
+        }
+        let manifest: Self = serde_json::from_slice(bytes)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_identity(
+            self.schema,
+            &self.version,
+            &self.mod_name,
+            &self.platform,
+            [&self.game_sha256, &self.dinput8_sha256, &self.user32_sha256],
+        )?;
+        if !hex(&self.source_revision, 40)
+            || self.rendering.is_empty()
+            || self.rendering.len() > 256
+            || self.rendering.chars().any(char::is_control)
+        {
+            return Err("Invalid package source or rendering metadata".into());
+        }
+        validate_assets(&self.assets, &FILES)
+    }
+}
+
+/// Reviewed release inputs. Per-release native identities belong here rather
+/// than in the package loader or its accepted-version logic.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recipe {
+    pub schema: u32,
+    pub version: String,
+    #[serde(rename = "mod")]
+    pub mod_name: String,
+    pub platform: String,
+    pub game_sha256: String,
+    pub dinput8_sha256: String,
+    pub user32_sha256: String,
+    pub performance_verified: bool,
+    pub compatibility_verified: bool,
+    pub rendering: String,
+    pub payloads: Vec<Asset>,
+}
+
+impl Recipe {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_METADATA_BYTES {
+            return Err("Release recipe exceeds its size bound".into());
+        }
+        let recipe: Self = serde_json::from_slice(bytes)?;
+        validate_identity(
+            recipe.schema,
+            &recipe.version,
+            &recipe.mod_name,
+            &recipe.platform,
+            [
+                &recipe.game_sha256,
+                &recipe.dinput8_sha256,
+                &recipe.user32_sha256,
+            ],
+        )?;
+        validate_assets(&recipe.payloads, &PAYLOADS)?;
+        Ok(recipe)
+    }
+
+    pub fn manifest(self, source_revision: String, assets: Vec<Asset>) -> Result<Manifest> {
+        let manifest = Manifest {
+            schema: self.schema,
+            version: self.version,
+            mod_name: self.mod_name,
+            platform: self.platform,
+            source_revision,
+            game_sha256: self.game_sha256,
+            dinput8_sha256: self.dinput8_sha256,
+            user32_sha256: self.user32_sha256,
+            performance_verified: self.performance_verified,
+            compatibility_verified: self.compatibility_verified,
+            rendering: self.rendering,
+            assets,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+}
+
+#[cfg(windows)]
+fn ordinary_file(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.is_file() && metadata.file_attributes() & 0x400 == 0
+}
+
+#[cfg(not(windows))]
+fn ordinary_file(metadata: &fs::Metadata) -> bool {
+    metadata.is_file() && !metadata.file_type().is_symlink()
+}
+
+pub fn read_local_file(root: &Path, name: &str, max: u64) -> Result<Vec<u8>> {
+    if !flat_name(name) {
+        return Err("Package file must be an ordinary filename".into());
+    }
+    let root = root.canonicalize()?;
+    let path = root.join(name);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !ordinary_file(&metadata)
+        || metadata.len() > max
+        || path.canonicalize()?.parent() != Some(root.as_path())
+    {
+        return Err(
+            format!("Package file escapes its owner or exceeds its size bound: {name}").into(),
+        );
+    }
+    let mut bytes = Vec::new();
+    File::open(&path)?.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err("Package file grew beyond its size bound".into());
+    }
+    Ok(bytes)
+}
+
+pub fn verify_asset_bytes(asset: &Asset, bytes: &[u8]) -> Result<()> {
+    if bytes.len() as u64 != asset.bytes || format!("{:x}", Sha256::digest(bytes)) != asset.sha256 {
+        return Err(format!("Package size or SHA-256 mismatch: {}", asset.name).into());
+    }
+    Ok(())
+}
+
+fn checksum_inventory(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err("Package checksums exceed their size bound".into());
+    }
+    let mut entries = BTreeMap::new();
+    for line in std::str::from_utf8(bytes)?.lines() {
+        let (hash, name) = line.split_once("  ").ok_or("Invalid checksum entry")?;
+        if !hex(hash, 64)
+            || !flat_name(name)
+            || entries.insert(name.to_owned(), hash.to_owned()).is_some()
+        {
+            return Err("Invalid or duplicate checksum entry".into());
+        }
+    }
+    Ok(entries)
+}
+
+pub fn verify_manifest_checksums(manifest: &Manifest, raw: &[u8], sums: &[u8]) -> Result<()> {
+    let mut expected: BTreeMap<_, _> = manifest
+        .assets
+        .iter()
+        .map(|a| (a.name.clone(), a.sha256.clone()))
+        .collect();
+    expected.insert("manifest.json".into(), format!("{:x}", Sha256::digest(raw)));
+    if checksum_inventory(sums)? != expected {
+        return Err("Package checksums do not bind the complete manifest inventory".into());
+    }
+    Ok(())
+}
+
+/// Checks the extracted release's complete local inventory. This is integrity
+/// validation; local checksums alone do not authenticate a GitHub publisher.
+pub fn load_manifest(bundle: &Path) -> Result<Manifest> {
+    let raw = read_local_file(bundle, "manifest.json", MAX_METADATA_BYTES)?;
+    let manifest = Manifest::parse(&raw)?;
+    let sums = read_local_file(bundle, "SHA256SUMS.txt", MAX_METADATA_BYTES)?;
+    verify_manifest_checksums(&manifest, &raw, &sums)?;
+    for asset in &manifest.assets {
+        let bytes = read_local_file(bundle, &asset.name, MAX_ASSET_BYTES)?;
+        verify_asset_bytes(asset, &bytes)?;
+    }
+    Ok(manifest)
+}
 
 pub fn digest(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
@@ -108,8 +374,8 @@ pub fn parse(args: &[String]) -> Result<Options> {
 }
 
 pub fn launch_arguments(options: &Options, bundle: &Path) -> Result<Vec<String>> {
-    let input = bundle.join(PAYLOADS[if options.rollback { 2 } else { 0 }].0);
-    let world = bundle.join(PAYLOADS[1].0);
+    let input = bundle.join(PAYLOADS[if options.rollback { 2 } else { 0 }]);
+    let world = bundle.join(PAYLOADS[1]);
     let paths = [
         input.to_str().ok_or("Non-Unicode DLL path")?,
         world.to_str().ok_or("Non-Unicode DLL path")?,
@@ -143,7 +409,7 @@ pub fn launch_arguments(options: &Options, bundle: &Path) -> Result<Vec<String>>
     ])
 }
 
-pub fn preflight(options: &Options, bundle: &Path, system: &Path) -> Result<()> {
+pub fn preflight(options: &Options, bundle: &Path, system: &Path) -> Result<Manifest> {
     if !options.game_root.is_absolute()
         || !options.tempest.is_absolute()
         || !bundle.is_absolute()
@@ -151,29 +417,36 @@ pub fn preflight(options: &Options, bundle: &Path, system: &Path) -> Result<()> 
     {
         return Err("Game, Tempest, bundle and Windows system paths must be absolute".into());
     }
-    verify(
-        &options.game_root.join("Binaries/Win64/Paladins.exe"),
-        GAME_SHA,
-    )?;
-    verify(
-        &bundle.join(PAYLOADS[if options.rollback { 2 } else { 0 }].0),
-        PAYLOADS[if options.rollback { 2 } else { 0 }].1,
-    )?;
-    verify(&bundle.join(PAYLOADS[1].0), PAYLOADS[1].1)?;
-    verify(&system.join("dinput8.dll"), DINPUT_SHA)?;
-    verify(&system.join("user32.dll"), USER32_SHA)?;
+    let manifest = load_manifest(bundle)?;
+    verify_native(&manifest, options, system)?;
     if !options.tempest.is_file() {
         return Err("Installed Tempest CLI is missing".into());
     }
     launch_arguments(options, bundle)?;
-    Ok(())
+    Ok(manifest)
 }
 
-#[derive(Serialize)]
-pub struct Asset {
-    pub name: String,
-    pub sha256: String,
-    pub bytes: u64,
+pub fn verify_native(manifest: &Manifest, options: &Options, system: &Path) -> Result<()> {
+    let game = digest(&options.game_root.join("Binaries/Win64/Paladins.exe"))?;
+    let input = digest(&system.join("dinput8.dll"))?;
+    let user = digest(&system.join("user32.dll"))?;
+    verify_native_digests(manifest, [&game, &input, &user])
+}
+
+fn verify_native_digests(manifest: &Manifest, actual: [&str; 3]) -> Result<()> {
+    for ((name, expected), actual) in [
+        ("Paladins.exe", manifest.game_sha256.as_str()),
+        ("dinput8.dll", manifest.dinput8_sha256.as_str()),
+        ("user32.dll", manifest.user32_sha256.as_str()),
+    ]
+    .into_iter()
+    .zip(actual)
+    {
+        if actual != expected {
+            return Err(format!("Selected package native compatibility mismatch: {name}").into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -202,17 +475,17 @@ mod tests {
         assert_eq!(argv[8], "--");
         assert!(argv[7].contains("Mods With Spaces"));
         assert!(!argv[7].contains("nabi"));
-        assert!(argv[7].contains(PAYLOADS[0].0));
-        assert!(argv[7].contains(PAYLOADS[1].0));
+        assert!(argv[7].contains(PAYLOADS[0]));
+        assert!(argv[7].contains(PAYLOADS[1]));
         assert_eq!(argv.last().unwrap(), "-Language=KOR");
     }
     #[test]
     fn rollback_retains_world_and_replaces_input_only() {
         let options = parse(&args(&["--dry-run", "--rollback"])).unwrap();
         let argv = launch_arguments(&options, Path::new("C:/Mods")).unwrap();
-        assert!(argv[7].contains(PAYLOADS[2].0));
-        assert!(argv[7].contains(PAYLOADS[1].0));
-        assert!(!argv[7].contains(PAYLOADS[0].0));
+        assert!(argv[7].contains(PAYLOADS[2]));
+        assert!(argv[7].contains(PAYLOADS[1]));
+        assert!(!argv[7].contains(PAYLOADS[0]));
     }
     #[test]
     fn refuses_dll_array_injection_and_bad_locale() {
@@ -226,5 +499,180 @@ mod tests {
         let expected = digest(&path).unwrap();
         assert!(verify(&path, &expected).is_ok());
         assert!(verify(&path, &"0".repeat(64)).is_err());
+    }
+
+    fn fixture(version: &str) -> Manifest {
+        Manifest {
+            schema: 1,
+            version: version.into(),
+            mod_name: "paladins-performance".into(),
+            platform: "windows-x86_64".into(),
+            source_revision: "a".repeat(40),
+            game_sha256: "b".repeat(64),
+            dinput8_sha256: "c".repeat(64),
+            user32_sha256: "d".repeat(64),
+            performance_verified: false,
+            compatibility_verified: false,
+            rendering: "uncapped".into(),
+            assets: FILES
+                .iter()
+                .map(|name| Asset {
+                    name: (*name).into(),
+                    sha256: format!("{:x}", Sha256::digest(name.as_bytes())),
+                    bytes: name.len() as u64,
+                })
+                .collect(),
+        }
+    }
+
+    fn sums(manifest: &Manifest, raw: &[u8]) -> Vec<u8> {
+        let mut entries: String = manifest
+            .assets
+            .iter()
+            .map(|a| format!("{}  {}\n", a.sha256, a.name))
+            .collect();
+        entries.push_str(&format!("{:x}  manifest.json\n", Sha256::digest(raw)));
+        entries.into_bytes()
+    }
+
+    #[test]
+    fn future_compatible_versions_use_manifest_native_metadata() {
+        for version in [VERSION, "71.23.109"] {
+            let manifest = fixture(version);
+            let raw = serde_json::to_vec(&manifest).unwrap();
+            let loaded = Manifest::parse(&raw).unwrap();
+            assert_eq!(loaded.version, version);
+            assert!(verify_manifest_checksums(&loaded, &raw, &sums(&loaded, &raw)).is_ok());
+            let hashes = [
+                &loaded.game_sha256[..],
+                &loaded.dinput8_sha256[..],
+                &loaded.user32_sha256[..],
+            ];
+            assert!(verify_native_digests(&loaded, hashes).is_ok());
+            for index in 0..3 {
+                let mut changed = hashes;
+                let other = "e".repeat(64);
+                changed[index] = &other;
+                assert!(verify_native_digests(&loaded, changed).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_identity_inventory_and_native_metadata_tampering() {
+        let good = fixture("71.23.109");
+        let mut bad = good.clone();
+        bad.schema += 1;
+        assert!(bad.validate().is_err());
+        for version in ["071.23.109", "71.23.109-rc1", "71.23", "71.23.4294967296"] {
+            bad = good.clone();
+            bad.version = version.into();
+            assert!(bad.validate().is_err());
+        }
+        bad = good.clone();
+        bad.mod_name.push('x');
+        assert!(bad.validate().is_err());
+        bad = good.clone();
+        bad.platform.push('x');
+        assert!(bad.validate().is_err());
+        bad = good.clone();
+        bad.source_revision.pop();
+        assert!(bad.validate().is_err());
+        bad = good.clone();
+        bad.game_sha256 = "G".repeat(64);
+        assert!(bad.validate().is_err());
+        bad = good.clone();
+        bad.assets.pop();
+        assert!(bad.validate().is_err());
+        bad = good.clone();
+        bad.assets.push(good.assets[0].clone());
+        assert!(bad.validate().is_err());
+        for name in [
+            "../other.dll",
+            "C:other.dll",
+            "sub\\other.dll",
+            "other.dll",
+            "other.dll.",
+        ] {
+            bad = good.clone();
+            bad.assets[0].name = name.into();
+            assert!(bad.validate().is_err());
+        }
+        for bytes in [0, MAX_ASSET_BYTES + 1] {
+            bad = good.clone();
+            bad.assets[0].bytes = bytes;
+            assert!(bad.validate().is_err());
+        }
+        let raw = serde_json::to_string(&good).unwrap();
+        let duplicate = raw.replacen('{', "{\"schema\":1,", 1);
+        assert!(Manifest::parse(duplicate.as_bytes()).is_err());
+        let unknown = raw.replacen('{', "{\"loader_override\":true,", 1);
+        assert!(Manifest::parse(unknown.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn checksum_inventory_binds_manifest_and_refuses_duplicates_or_paths() {
+        let manifest = fixture("71.23.109");
+        let raw = serde_json::to_vec(&manifest).unwrap();
+        let good = sums(&manifest, &raw);
+        assert!(verify_manifest_checksums(&manifest, &raw, &good).is_ok());
+        assert!(verify_manifest_checksums(&manifest, b"changed manifest", &good).is_err());
+        let mut duplicate = good.clone();
+        duplicate.extend(format!("{}  manifest.json\n", "a".repeat(64)).bytes());
+        assert!(verify_manifest_checksums(&manifest, &raw, &duplicate).is_err());
+        let mut extra = good.clone();
+        extra.extend(format!("{}  ../other.dll\n", "a".repeat(64)).bytes());
+        assert!(verify_manifest_checksums(&manifest, &raw, &extra).is_err());
+        assert!(
+            verify_manifest_checksums(
+                &manifest,
+                &raw,
+                good.splitn(2, |b| *b == b'\n').nth(1).unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn payload_hash_and_length_are_both_required() {
+        let bytes = b"native payload";
+        let asset = Asset {
+            name: PAYLOADS[1].into(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            bytes: bytes.len() as u64,
+        };
+        assert!(verify_asset_bytes(&asset, bytes).is_ok());
+        assert!(verify_asset_bytes(&asset, b"Native payload").is_err());
+        assert!(verify_asset_bytes(&asset, &bytes[..bytes.len() - 1]).is_err());
+        for name in ["../Cargo.toml", "src/lib.rs", "C:Cargo.toml"] {
+            assert!(
+                read_local_file(Path::new(env!("CARGO_MANIFEST_DIR")), name, MAX_ASSET_BYTES)
+                    .is_err()
+            );
+        }
+        assert!(read_local_file(Path::new(env!("CARGO_MANIFEST_DIR")), "Cargo.toml", 1).is_err());
+    }
+
+    #[test]
+    fn recipe_requires_complete_payload_inventory() {
+        let raw = include_bytes!("../release-recipe.json");
+        assert!(Recipe::parse(raw).is_ok());
+        let mut recipe: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        recipe["version"] = "71.23.109".into();
+        assert!(Recipe::parse(&serde_json::to_vec(&recipe).unwrap()).is_ok());
+        recipe["payloads"].as_array_mut().unwrap().pop();
+        assert!(Recipe::parse(&serde_json::to_vec(&recipe).unwrap()).is_err());
+    }
+
+    #[test]
+    fn loader_has_no_compiled_release_versions_or_fingerprints() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        for literal in source.split('"').skip(1).step_by(2) {
+            assert!(!hex(literal, 64), "Compiled fingerprint: {literal}");
+            assert!(
+                !release_version(literal),
+                "Compiled release selector: {literal}"
+            );
+        }
     }
 }

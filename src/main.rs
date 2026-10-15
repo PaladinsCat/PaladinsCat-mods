@@ -29,10 +29,11 @@ fn run(options: &Options) -> Result<()> {
         .ok_or("Launcher parent missing")?
         .canonicalize()?;
     let system = std::path::PathBuf::from(std::env::var("SystemRoot")?).join("System32");
-    preflight(options, &bundle, &system)?;
+    let manifest = preflight(options, &bundle, &system)?;
     let argv = launch_arguments(options, &bundle)?;
     println!(
-        "PaladinsCat performance mod v{VERSION}; pinned game/input/world/native files verified."
+        "PaladinsCat performance mod v{}; package and native compatibility verified.",
+        manifest.version
     );
     println!("Tempest argv: {argv:?}");
     if !options.launch {
